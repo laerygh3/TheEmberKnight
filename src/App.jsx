@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   BookOpen, Users, MessageSquare, Plus, Save, Trash2, Image, Sparkles, 
-  Layers, Map, BarChart2, CheckCircle2, ChevronRight, Edit2, X, Send, 
-  Copy, Link2, AlertCircle, RefreshCw, UploadCloud, User, UserCheck, HelpCircle
+  Layers, Map, BarChart2, CheckCircle2, ChevronRight, Edit2, X, Send, Shield, LogOut,
+  Copy, Link2, AlertCircle, RefreshCw, UploadCloud, User, UserCheck, HelpCircle 
 } from 'lucide-react';
 
 // Firebase initialization utilizing environment configuration
@@ -14,7 +14,7 @@ let firebaseAvailable = false;
 try {
   if (typeof __firebase_config !== 'undefined' && __firebase_config) {
     const { initializeApp } = require('firebase/app');
-    const { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } = require('firebase/auth');
+    const { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } = require('firebase/auth');
     const { getFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, getDocs } = require('firebase/firestore');
     
     const firebaseConfig = JSON.parse(__firebase_config);
@@ -134,7 +134,13 @@ export default function App() {
 
   // Comment state
   const [commentText, setCommentText] = useState('');
+  
+  // Identity & Access Management
   const [authorName, setAuthorName] = useState('비공개 협업자');
+  const [members, setMembers] = useState([]);
+  const [membersLoaded, setMembersLoaded] = useState(false);
+  const [newMemberEmail, setNewMemberEmail] = useState('');
+  const [newMemberRole, setNewMemberRole] = useState('editor');
 
   // Sync state & visual notifications
   const [syncStatus, setSyncStatus] = useState('Initializing...');
@@ -143,7 +149,6 @@ export default function App() {
   // Authentication handler following Rule 3
   useEffect(() => {
     if (!firebaseAvailable) {
-      setUser({ uid: 'guest-developer-1234-uuid', displayName: '오프라인 개발자' });
       setSyncStatus('Local Storage Mode');
       // Load from localStorage or defaults
       const localCards = localStorage.getItem('ember_cards');
@@ -160,24 +165,14 @@ export default function App() {
           { id: 'com-2', cardId: 'card-3', author: '와론 팬', text: '와론의 도깨비 위압감이 방치형 가챠 등급(SSR)에 아주 잘 연동되었네요.', createdAt: new Date().toISOString() }
         ]);
       }
+
+      const localMembers = localStorage.getItem('ember_members');
+      if (localMembers) setMembers(JSON.parse(localMembers));
+      setMembersLoaded(true);
       return;
     }
 
-    const { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } = require('firebase/auth');
-    const initAuth = async () => {
-      try {
-        setSyncStatus('Authenticating...');
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) {
-        console.error("Firebase auth error:", err);
-        setSyncStatus('Auth Failed (offline fallback)');
-      }
-    };
-    initAuth();
+    const { onAuthStateChanged } = require('firebase/auth');
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       if (u) {
         setUser(u);
@@ -188,6 +183,35 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (user?.displayName) setAuthorName(user.displayName);
+    else if (user?.email) setAuthorName(user.email.split('@')[0]);
+  }, [user]);
+
+  const handleGoogleLogin = async () => {
+    if (firebaseAvailable && auth) {
+      const { GoogleAuthProvider, signInWithPopup } = require('firebase/auth');
+      try {
+        await signInWithPopup(auth, new GoogleAuthProvider());
+      } catch (err) {
+        console.error("Login failed", err);
+        triggerNotification("구글 로그인에 실패했습니다.");
+      }
+    } else {
+      const email = prompt("오프라인 테스트: 이메일을 입력하세요 (예: test@gmail.com)");
+      if (email) setUser({ uid: 'local-test-uid', email, displayName: email.split('@')[0] });
+    }
+  };
+
+  const handleLogout = async () => {
+    if (firebaseAvailable && auth) {
+      const { signOut } = require('firebase/auth');
+      await signOut(auth);
+    } else {
+      setUser(null);
+    }
+  };
 
   // Firestore real-time synchronization complying with Rule 1 and Rule 2
   useEffect(() => {
@@ -228,11 +252,43 @@ export default function App() {
       console.error("Comments snapshot error:", error);
     });
 
+    // 3. Fetching Members (Access Control)
+    const membersCol = collection(db, 'artifacts', appId, 'public', 'data', 'members');
+    const unsubscribeMembers = onSnapshot(query(membersCol), (snapshot) => {
+      const fetchedMembers = [];
+      snapshot.forEach(doc => {
+        fetchedMembers.push({ id: doc.id, ...doc.data() });
+      });
+      setMembers(fetchedMembers);
+      setMembersLoaded(true);
+    }, (error) => {
+      console.error("Members snapshot error:", error);
+      setMembersLoaded(true);
+    });
+
     return () => {
       unsubscribeCards();
       unsubscribeComments();
+      unsubscribeMembers();
     };
   }, [user]);
+
+  const currentUserEmail = user?.email || '';
+
+  // Auto-assign Master role to the first user
+  useEffect(() => {
+    if (membersLoaded && members.length === 0 && currentUserEmail) {
+      const newMember = { id: `member-${Date.now()}`, email: currentUserEmail, role: 'master', createdAt: new Date().toISOString() };
+      if (firebaseAvailable && db) {
+        const { doc, setDoc } = require('firebase/firestore');
+        setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'members', newMember.id), newMember).catch(err => console.error(err));
+      } else {
+        const updatedMembers = [newMember];
+        setMembers(updatedMembers);
+        localStorage.setItem('ember_members', JSON.stringify(updatedMembers));
+      }
+    }
+  }, [membersLoaded, members.length, currentUserEmail]);
 
   const triggerNotification = (message) => {
     setShowNotification(message);
@@ -426,8 +482,143 @@ export default function App() {
     triggerNotification("동시 공동작업 링크가 클립보드에 복사되었습니다! 팀원에게 공유하세요.");
   };
 
+  // User Role Management Actions
+  const handleAddMember = async () => {
+    if (!newMemberEmail.trim() || !newMemberEmail.includes('@')) {
+      triggerNotification("올바른 이메일 형식을 입력하세요.");
+      return;
+    }
+    if (members.find(m => m.email === newMemberEmail.trim())) {
+      triggerNotification("이미 등록된 멤버입니다.");
+      return;
+    }
+
+    const newMember = {
+      id: `member-${Date.now()}`,
+      email: newMemberEmail.trim(),
+      role: newMemberRole,
+      createdAt: new Date().toISOString()
+    };
+
+    if (firebaseAvailable && db) {
+      const { doc, setDoc } = require('firebase/firestore');
+      try {
+        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'members', newMember.id), newMember);
+        triggerNotification(`${newMemberEmail} 멤버가 추가되었습니다.`);
+      } catch (err) {
+        console.error("Error adding member:", err);
+      }
+    } else {
+      const updated = [...members, newMember];
+      setMembers(updated);
+      localStorage.setItem('ember_members', JSON.stringify(updated));
+      triggerNotification(`${newMemberEmail} 멤버가 추가되었습니다.`);
+    }
+    setNewMemberEmail('');
+  };
+
+  const handleUpdateMemberRole = async (memberId, newRole) => {
+    if (firebaseAvailable && db) {
+      const { doc, updateDoc } = require('firebase/firestore');
+      try {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'members', memberId), { role: newRole });
+        triggerNotification(`권한이 변경되었습니다.`);
+      } catch (err) {
+        console.error("Error updating member role:", err);
+      }
+    } else {
+      const updated = members.map(m => m.id === memberId ? { ...m, role: newRole } : m);
+      setMembers(updated);
+      localStorage.setItem('ember_members', JSON.stringify(updated));
+      triggerNotification(`권한이 변경되었습니다.`);
+    }
+  };
+
+  const handleRemoveMember = async (memberId) => {
+    if (firebaseAvailable && db) {
+      const { doc, deleteDoc } = require('firebase/firestore');
+      try {
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'members', memberId));
+        triggerNotification(`멤버가 삭제되었습니다.`);
+      } catch (err) {
+        console.error("Error removing member:", err);
+      }
+    } else {
+      const updated = members.filter(m => m.id !== memberId);
+      setMembers(updated);
+      localStorage.setItem('ember_members', JSON.stringify(updated));
+      triggerNotification(`멤버가 삭제되었습니다.`);
+    }
+  };
+
   const filteredCards = cards.filter(card => card.tab === activeTab);
   const activeComments = comments.filter(com => com.cardId === selectedCardId);
+
+  // Authentication & Access Control Screens
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center p-4 font-sans">
+        <div className="bg-zinc-900 border border-zinc-800 p-8 rounded-xl shadow-2xl max-w-sm w-full">
+          <div className="flex justify-center mb-6">
+            <div className="w-16 h-16 bg-gradient-to-br from-amber-500 to-orange-600 rounded-2xl flex items-center justify-center font-bold text-3xl text-zinc-950 shadow-lg">
+              잔
+            </div>
+          </div>
+          <h2 className="text-xl font-bold text-center text-amber-500 mb-2">기획 마스터 허브 접속</h2>
+          <p className="text-xs text-center text-zinc-400 mb-8">안전한 워크스페이스 접근을 위해 구글 계정으로 로그인해주세요.</p>
+          <button 
+            onClick={handleGoogleLogin}
+            className="w-full bg-zinc-100 hover:bg-white text-zinc-950 font-bold py-3 px-4 rounded-lg shadow-md transition-all flex items-center justify-center gap-3"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+            </svg>
+            구글 계정으로 시작하기
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!membersLoaded) {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+        <RefreshCw className="w-8 h-8 text-amber-500 animate-spin" />
+      </div>
+    );
+  }
+
+  const myMember = members.find(m => m.email === currentUserEmail);
+  const isFirstUser = members.length === 0;
+  const hasAccess = isFirstUser || !!myMember;
+
+  if (!hasAccess) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center p-4 font-sans">
+        <div className="bg-zinc-900 border border-red-900/50 p-8 rounded-xl shadow-2xl max-w-sm w-full text-center">
+          <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
+          <h2 className="text-xl font-bold text-zinc-100 mb-2">접근 권한 없음</h2>
+          <p className="text-sm text-zinc-400 mb-6">
+            <span className="text-amber-500 font-semibold">{currentUserEmail}</span> 계정은 워크스페이스에 등록되지 않았습니다.<br/><br/>
+            마스터 계정 관리자에게 이메일 추가를 요청하세요.
+          </p>
+          <button 
+            onClick={handleLogout}
+            className="w-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+          >
+            <LogOut className="w-4 h-4" /> 다른 계정으로 로그인
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const myRole = myMember ? myMember.role : 'master';
+  const isMaster = myRole === 'master';
+  const canEdit = myRole === 'master' || myRole === 'editor';
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans antialiased">
@@ -468,7 +659,12 @@ export default function App() {
             {/* Complete User ID display as per safety rules */}
             <div className="text-xs text-zinc-500 bg-zinc-950 px-3 py-1.5 rounded-md border border-zinc-800 hidden sm:flex items-center gap-2">
               <UserCheck className="w-3.5 h-3.5 text-zinc-400" />
-              <span>ID: <span className="font-mono text-zinc-300 select-all">{user?.uid || 'offline-mode-user'}</span></span>
+              <span>ID: <span className="font-mono text-zinc-300 select-all">{user?.uid || 'offline'}</span></span>
+              <span className="w-px h-3 bg-zinc-800 mx-1"></span>
+              <span className="truncate max-w-[120px] text-zinc-300">{currentUserEmail}</span>
+              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${isMaster ? 'bg-amber-900 text-amber-400' : canEdit ? 'bg-emerald-900 text-emerald-400' : 'bg-zinc-800 text-zinc-400'}`}>
+                {isMaster ? 'MASTER' : canEdit ? 'EDITOR' : 'VIEWER'}
+              </span>
             </div>
 
             <button 
@@ -476,7 +672,14 @@ export default function App() {
               className="bg-amber-600 text-zinc-950 hover:bg-amber-500 font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 shadow-md transition-all transform hover:-translate-y-0.5"
             >
               <Link2 className="w-3.5 h-3.5" />
-              <span>동작 링크 복사</span>
+              <span className="hidden sm:inline">링크 복사</span>
+            </button>
+            <button 
+              onClick={handleLogout}
+              className="bg-zinc-800 text-zinc-300 hover:bg-zinc-700 font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 shadow-md transition-all"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">로그아웃</span>
             </button>
           </div>
         </div>
@@ -496,8 +699,9 @@ export default function App() {
                 { id: 'characters', label: '캐릭터/몬스터', icon: Users, desc: '100종 영웅 & 50종 몬스터 구성' },
                 { id: 'combat', label: '전투/스테이지', icon: Map, desc: '이원화 20단계 난이도 스펙' },
                 { id: 'roadmap', label: '로드맵/검수', icon: BookOpen, desc: '4개월 완성 타겟 마일스톤' },
-                { id: 'business', label: '지표/비즈니스', icon: BarChart2, desc: '리텐션 & RS 정산 관리' }
-              ].map((tab) => {
+                { id: 'business', label: '지표/비즈니스', icon: BarChart2, desc: '리텐션 & RS 정산 관리' },
+                isMaster ? { id: 'settings', label: '계정/권한 관리', icon: Shield, desc: '팀원 초대 및 역할 관리' } : null
+              ].filter(Boolean).map((tab) => {
                 const Icon = tab.icon;
                 return (
                   <button
@@ -557,105 +761,186 @@ export default function App() {
         {/* Middle/Main Area: Interactive Content Cards */}
         <section className="lg:col-span-6 space-y-6">
           <div className="bg-zinc-900 rounded-xl p-6 border border-zinc-800 shadow-xl">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-lg font-extrabold text-zinc-50 flex items-center gap-2">
-                <span className="w-2.5 h-2.5 bg-amber-500 rounded-full"></span>
-                {activeTab === 'characters' && '캐릭터 / 몬스터 데이터 보드'}
-                {activeTab === 'combat' && '전투 / 스테이지 밸런스 정보'}
-                {activeTab === 'roadmap' && '개발 마일스톤 및 작가 피드백'}
-                {activeTab === 'business' && '지표 통계 및 라이선스 정산 계획'}
-              </h2>
-            </div>
+            {activeTab === 'settings' ? (
+              <div>
+                <div className="mb-6">
+                  <h2 className="text-lg font-extrabold text-amber-500 flex items-center gap-2">
+                    <Shield className="w-5 h-5" /> 워크스페이스 팀원 권한 관리 (Master 전용)
+                  </h2>
+                  <p className="text-xs text-zinc-400 mt-1">이메일을 통해 프로젝트 팀원을 관리하고 접근 및 수정 권한을 통제합니다.</p>
+                </div>
+                
+                <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-4 mb-6">
+                  <h3 className="text-sm font-bold text-zinc-200 mb-3">새 멤버 접근 권한 추가</h3>
+                  <div className="flex gap-3 flex-col sm:flex-row">
+                    <input 
+                      type="email" 
+                      value={newMemberEmail}
+                      onChange={(e) => setNewMemberEmail(e.target.value)}
+                      placeholder="추가할 이메일 주소"
+                      className="flex-1 bg-zinc-900 text-xs text-zinc-200 border border-zinc-800 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
+                    />
+                    <select 
+                      value={newMemberRole}
+                      onChange={(e) => setNewMemberRole(e.target.value)}
+                      className="bg-zinc-900 text-xs text-zinc-200 border border-zinc-800 rounded-lg p-2 focus:ring-1 focus:ring-amber-500 min-w-[120px]"
+                    >
+                      <option value="editor">편집자 (Editor)</option>
+                      <option value="viewer">뷰어 (Viewer)</option>
+                    </select>
+                    <button 
+                      onClick={handleAddMember}
+                      className="bg-amber-600 hover:bg-amber-500 text-zinc-950 font-bold px-4 py-2 rounded-lg text-xs flex items-center justify-center gap-1.5"
+                    >
+                      <Plus className="w-4 h-4" /> 추가
+                    </button>
+                  </div>
+                </div>
 
-            {/* List of active design items in this category */}
-            {filteredCards.length === 0 ? (
-              <div className="text-center py-12 text-zinc-500">
-                <AlertCircle className="w-12 h-12 mx-auto mb-3 text-zinc-700" />
-                <p className="text-sm">현재 탭에 작성된 기획 명세가 없습니다.</p>
-                <p className="text-xs text-zinc-600 mt-1">우측 에디터를 활용해 첫 명세를 등록해보세요!</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {filteredCards.map((card) => (
-                  <div 
-                    key={card.id}
-                    onClick={() => setSelectedCardId(card.id)}
-                    className={`p-4 rounded-xl transition-all border cursor-pointer ${
-                      selectedCardId === card.id 
-                        ? 'bg-zinc-850 border-amber-500/80 shadow-amber-950/20 shadow-md' 
-                        : 'bg-zinc-900 hover:bg-zinc-850/50 border-zinc-800'
-                    }`}
-                  >
-                    <div className="flex gap-4">
-                      {card.image && (
-                        <img 
-                          src={card.image} 
-                          alt="Concept" 
-                          className="w-20 h-20 sm:w-24 sm:h-24 rounded-lg object-cover flex-shrink-0 border border-zinc-800 shadow-inner"
-                        />
-                      )}
-                      <div className="flex-1 min-w-0 flex flex-col justify-between">
-                        <div>
-                          <div className="flex justify-between items-start gap-2">
-                            <h4 className="font-bold text-sm sm:text-base text-zinc-100 hover:text-amber-400 transition-colors truncate">
-                              {card.title}
-                            </h4>
-                            <div className="flex gap-1.5 flex-shrink-0">
-                              <button 
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setIsEditing(true);
-                                  setSelectedCard(card);
-                                  setNewCardTitle(card.title);
-                                  setNewCardContent(card.content);
-                                  setNewCardImage(card.image);
-                                }}
-                                className="p-1 hover:text-amber-400 text-zinc-500 rounded transition-colors"
-                                title="수정"
-                              >
-                                <Edit2 className="w-4 h-4" />
-                              </button>
-                              <button 
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleDeleteCard(card.id);
-                                }}
-                                className="p-1 hover:text-red-500 text-zinc-500 rounded transition-colors"
-                                title="삭제"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </div>
-                          <p className="text-xs sm:text-sm text-zinc-400 line-clamp-3 mt-1.5 whitespace-pre-wrap leading-relaxed">
-                            {card.content}
-                          </p>
+                <div className="space-y-3">
+                  <h3 className="text-sm font-bold text-zinc-200 mb-2">등록된 멤버 목록</h3>
+                  {members.map(member => (
+                    <div key={member.id} className="flex flex-col sm:flex-row sm:items-center justify-between bg-zinc-850 border border-zinc-800 p-3 rounded-lg gap-3 transition-colors hover:bg-zinc-800/80">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs flex-shrink-0 ${member.role === 'master' ? 'bg-amber-500 text-zinc-950' : member.role === 'editor' ? 'bg-emerald-500 text-zinc-950' : 'bg-zinc-700 text-zinc-300'}`}>
+                          {member.email.charAt(0).toUpperCase()}
                         </div>
-
-                        <div className="flex justify-between items-center text-[11px] text-zinc-500 mt-3 pt-2 border-t border-zinc-800/40">
-                          <span className="font-medium text-amber-500/80">지은이: {card.author}</span>
-                          <div className="flex items-center space-x-3">
-                            <button 
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleLikeCard(card.id, card.likes);
-                              }}
-                              className="flex items-center space-x-1 text-zinc-400 hover:text-amber-500 transition-colors"
-                            >
-                              <span>🔥</span>
-                              <span className="font-bold text-zinc-300">{card.likes || 0}</span>
-                            </button>
-                            <span className="flex items-center gap-1">
-                              <MessageSquare className="w-3 h-3 text-zinc-500" />
-                              {comments.filter(c => c.cardId === card.id).length}
-                            </span>
+                        <div>
+                          <div className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+                            {member.email}
+                            {member.email === currentUserEmail && <span className="text-[10px] bg-amber-900/50 text-amber-400 px-1.5 py-0.5 rounded border border-amber-700/50">나</span>}
+                          </div>
+                          <div className="text-[10px] text-zinc-500 mt-0.5">
+                            {member.role === 'master' ? '마스터 (모든 권한)' : member.role === 'editor' ? '편집자 (작성/수정 가능)' : '뷰어 (읽기만 가능)'}
                           </div>
                         </div>
                       </div>
+                      {member.role !== 'master' && (
+                        <div className="flex items-center gap-2">
+                          <select 
+                            value={member.role}
+                            onChange={(e) => handleUpdateMemberRole(member.id, e.target.value)}
+                            className="bg-zinc-900 text-xs text-zinc-200 border border-zinc-800 rounded p-1.5 focus:ring-1 focus:ring-amber-500"
+                          >
+                            <option value="editor">편집자</option>
+                            <option value="viewer">뷰어</option>
+                          </select>
+                          <button 
+                            onClick={() => handleRemoveMember(member.id)}
+                            className="p-1.5 text-zinc-500 hover:text-red-500 hover:bg-zinc-800 rounded transition-colors"
+                            title="멤버 삭제"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
+            ) : (
+              <>
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-lg font-extrabold text-zinc-50 flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 bg-amber-500 rounded-full"></span>
+                    {activeTab === 'characters' && '캐릭터 / 몬스터 데이터 보드'}
+                    {activeTab === 'combat' && '전투 / 스테이지 밸런스 정보'}
+                    {activeTab === 'roadmap' && '개발 마일스톤 및 작가 피드백'}
+                    {activeTab === 'business' && '지표 통계 및 라이선스 정산 계획'}
+                  </h2>
+                </div>
+                {filteredCards.length === 0 ? (
+                  <div className="text-center py-12 text-zinc-500">
+                    <AlertCircle className="w-12 h-12 mx-auto mb-3 text-zinc-700" />
+                    <p className="text-sm">현재 탭에 작성된 기획 명세가 없습니다.</p>
+                    <p className="text-xs text-zinc-600 mt-1">우측 에디터를 활용해 첫 명세를 등록해보세요!</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {filteredCards.map((card) => (
+                      <div 
+                        key={card.id}
+                        onClick={() => setSelectedCardId(card.id)}
+                        className={`p-4 rounded-xl transition-all border cursor-pointer ${
+                          selectedCardId === card.id 
+                            ? 'bg-zinc-850 border-amber-500/80 shadow-amber-950/20 shadow-md' 
+                            : 'bg-zinc-900 hover:bg-zinc-850/50 border-zinc-800'
+                        }`}
+                      >
+                        <div className="flex gap-4">
+                          {card.image && (
+                            <img 
+                              src={card.image} 
+                              alt="Concept" 
+                              className="w-20 h-20 sm:w-24 sm:h-24 rounded-lg object-cover flex-shrink-0 border border-zinc-800 shadow-inner"
+                            />
+                          )}
+                          <div className="flex-1 min-w-0 flex flex-col justify-between">
+                            <div>
+                              <div className="flex justify-between items-start gap-2">
+                                <h4 className="font-bold text-sm sm:text-base text-zinc-100 hover:text-amber-400 transition-colors truncate">
+                                  {card.title}
+                                </h4>
+                                {canEdit && (
+                                  <div className="flex gap-1.5 flex-shrink-0">
+                                    <button 
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setIsEditing(true);
+                                        setSelectedCard(card);
+                                        setNewCardTitle(card.title);
+                                        setNewCardContent(card.content);
+                                        setNewCardImage(card.image);
+                                      }}
+                                      className="p-1 hover:text-amber-400 text-zinc-500 rounded transition-colors"
+                                      title="수정"
+                                    >
+                                      <Edit2 className="w-4 h-4" />
+                                    </button>
+                                    <button 
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDeleteCard(card.id);
+                                      }}
+                                      className="p-1 hover:text-red-500 text-zinc-500 rounded transition-colors"
+                                      title="삭제"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                              <p className="text-xs sm:text-sm text-zinc-400 line-clamp-3 mt-1.5 whitespace-pre-wrap leading-relaxed">
+                                {card.content}
+                              </p>
+                            </div>
+
+                            <div className="flex justify-between items-center text-[11px] text-zinc-500 mt-3 pt-2 border-t border-zinc-800/40">
+                              <span className="font-medium text-amber-500/80">지은이: {card.author}</span>
+                              <div className="flex items-center space-x-3">
+                                <button 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleLikeCard(card.id, card.likes);
+                                  }}
+                                  className="flex items-center space-x-1 text-zinc-400 hover:text-amber-500 transition-colors"
+                                >
+                                  <span>🔥</span>
+                                  <span className="font-bold text-zinc-300">{card.likes || 0}</span>
+                                </button>
+                                <span className="flex items-center gap-1">
+                                  <MessageSquare className="w-3 h-3 text-zinc-500" />
+                                  {comments.filter(c => c.cardId === card.id).length}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </section>
@@ -665,6 +950,14 @@ export default function App() {
           
           {/* Editor Mode: Create or Update */}
           <div className="bg-zinc-900 rounded-xl p-5 border border-zinc-800 shadow-xl">
+            {!canEdit ? (
+              <div className="text-center py-10">
+                <Shield className="w-10 h-10 mx-auto text-zinc-700 mb-3" />
+                <h3 className="font-bold text-sm text-zinc-300 mb-1">편집 권한 없음</h3>
+                <p className="text-xs text-zinc-500">뷰어 권한이 부여된 계정입니다.<br/>기획서 작성 및 수정이 제한됩니다.</p>
+              </div>
+            ) : (
+            <>
             <h3 className="font-bold text-sm text-amber-500 mb-3 flex items-center gap-2">
               <Sparkles className="w-4 h-4" /> 
               {isEditing ? '선택 기획서 수정하기' : '새로운 기획 명세 작성'}
@@ -765,6 +1058,8 @@ export default function App() {
                 )}
               </div>
             </form>
+            </>
+            )}
           </div>
 
           {/* Contextual Collaborative Comments Area */}
@@ -797,23 +1092,29 @@ export default function App() {
                 </div>
 
                 {/* Send Comment Box */}
-                <form onSubmit={handleAddComment} className="mt-auto">
-                  <div className="flex gap-2">
-                    <input 
-                      type="text"
-                      value={commentText}
-                      onChange={(e) => setCommentText(e.target.value)}
-                      placeholder="감수 검토 의견 입력..."
-                      className="flex-1 bg-zinc-950 text-xs text-zinc-200 border border-zinc-800 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
-                    />
-                    <button 
-                      type="submit"
-                      className="bg-amber-600 text-zinc-950 hover:bg-amber-500 p-2 rounded-lg"
-                    >
-                      <Send className="w-4 h-4" />
-                    </button>
+                {canEdit ? (
+                  <form onSubmit={handleAddComment} className="mt-auto">
+                    <div className="flex gap-2">
+                      <input 
+                        type="text"
+                        value={commentText}
+                        onChange={(e) => setCommentText(e.target.value)}
+                        placeholder="감수 검토 의견 입력..."
+                        className="flex-1 bg-zinc-950 text-xs text-zinc-200 border border-zinc-800 rounded-lg p-2 focus:ring-1 focus:ring-amber-500"
+                      />
+                      <button 
+                        type="submit"
+                        className="bg-amber-600 text-zinc-950 hover:bg-amber-500 p-2 rounded-lg"
+                      >
+                        <Send className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="mt-auto text-center p-2 bg-zinc-950 rounded-lg border border-zinc-850 text-xs text-zinc-500">
+                    뷰어는 의견을 작성할 수 없습니다.
                   </div>
-                </form>
+                )}
               </>
             ) : (
               <div className="text-center py-12 text-zinc-600 text-xs">
